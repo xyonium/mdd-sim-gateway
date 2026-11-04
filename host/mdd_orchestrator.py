@@ -1160,6 +1160,11 @@ class Orchestrator:
             target_data_active = bool(wanted.get("cellular_enabled")) and not bool(
                 wanted.get("flight_mode"))
             observed_data_active = bool(cellular_state.get("data_active"))
+            cell_state = str(cellular_state.get("state") or "").lower()
+            data_transitioning = (
+                (target_data_active and not observed_data_active and cell_state in {"enabling", "connecting"})
+                or (not target_data_active and observed_data_active and cell_state == "disconnecting")
+            )
             # The bridge is no longer a VoWiFi actual: it runs for every present modem so
             # the card stays reachable. Comparing it against the VoWiFi switch would park
             # every switched-off modem in "stopping" forever.
@@ -1173,7 +1178,7 @@ class Orchestrator:
             # the cellular state, and VoWiFi carries on through the bridge.
             modem_failed = device_id in self._modem_failed
             device_transitioning = bool(transitioning or (not degraded and not modem_failed and
-                present and (target_data_active != observed_data_active or
+                present and (data_transitioning or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
                              (not self._serial_mode
@@ -3291,6 +3296,7 @@ class Orchestrator:
         # modem, and turning VoWiFi off to run an eSIM operation emptied the reader under
         # it. Bridges follow the hardware instead: every present modem gets one.
         live_ids = {m["id"] for m in modems}
+        modem_by_id = {m["id"]: m for m in modems}
         for hwid in list(self.bridges):
             proc = self.bridges[hwid]
             exited = proc.poll() is not None
@@ -3302,6 +3308,14 @@ class Orchestrator:
             # pcscd no longer listens on, so a port change has to respawn it.
             moved = (hwid in live_ids
                      and self.bridge_ports.get(hwid) != assignments[hwid]["base_port"])
+            if not moved and not exited and through_modemmanager and hwid in modem_by_id:
+                cmd = self._bridge_commands.get(hwid) or []
+                if "--modemmanager" in cmd:
+                    idx = cmd.index("--modemmanager")
+                    old_mm = cmd[idx + 1] if idx + 1 < len(cmd) else ""
+                    new_mm = self.modemmanager_modem_for_tty(modem_by_id[hwid]["tty"])
+                    if old_mm and new_mm and old_mm != new_mm:
+                        moved = True
             if hwid not in live_ids or moved or exited:
                 self.bridges.pop(hwid)
                 self.bridge_ports.pop(hwid, None)
